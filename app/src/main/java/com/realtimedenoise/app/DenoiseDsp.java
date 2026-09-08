@@ -8,21 +8,26 @@ package com.realtimedenoise.app;
 public class DenoiseDsp {
 
     private final Biquad highpass;
+    private final Biquad lowCut;
     private final Biquad eq200, eq700, eq2300, eq5000;
     private final double limit;
 
     public DenoiseDsp(int sampleRate) {
-        highpass = Biquad.highpass(sampleRate, 85.0, 0.707);
-        eq200 = Biquad.peaking(sampleRate, 200.0, 2.5, 1.0);
-        eq700 = Biquad.peaking(sampleRate, 700.0, 3.5, 1.0);
-        eq2300 = Biquad.peaking(sampleRate, 2300.0, 4.5, 1.0);
-        eq5000 = Biquad.peaking(sampleRate, 5000.0, 2.0, 1.0);
-        limit = 0.92;
+        // stronger noise reduction: raise corner + deep low-cut of rumble band
+        highpass = Biquad.highpass(sampleRate, 100.0, 0.707);
+        lowCut = Biquad.peaking(sampleRate, 80.0, -12.0, 0.8);
+        // stronger vocal boost
+        eq200 = Biquad.peaking(sampleRate, 200.0, 4.0, 1.0);
+        eq700 = Biquad.peaking(sampleRate, 700.0, 5.0, 1.0);
+        eq2300 = Biquad.peaking(sampleRate, 2300.0, 6.0, 1.0);
+        eq5000 = Biquad.peaking(sampleRate, 5000.0, 3.0, 1.0);
+        limit = 0.90;
     }
 
     /** In-place process a float block (values roughly in [-1,1]). */
     public void process(float[] buf, int len) {
         highpass.run(buf, len);
+        lowCut.run(buf, len);
         eq200.run(buf, len);
         eq700.run(buf, len);
         eq2300.run(buf, len);
