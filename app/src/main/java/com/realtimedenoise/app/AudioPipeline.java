@@ -35,6 +35,11 @@ public class AudioPipeline {
     private RandomAccessFile wav;
     private int wavDataBytes;
 
+    // AGC: faint system-capture sources (e.g. ~-60dBFS) are inaudible, so we
+    // normalize level toward a comfortable target before the DSP chain.
+    private volatile boolean agcOn = false;
+    private double agcGain = 1.0;
+
     public void start(AudioRecord source, boolean monitor, boolean save, File outFile) throws Exception {
         record = source;
 
@@ -78,6 +83,32 @@ public class AudioPipeline {
         thread.start();
     }
 
+    /** Enable AGC (used for faint system-capture input). Should be called before start(). */
+    public void setAutoGain(boolean on) {
+        agcOn = on;
+        agcGain = 1.0;
+    }
+
+    /**
+     * Simple per-block AGC: smooth the peak toward a target so a very quiet
+     * captured source becomes clearly audible without clipping. Only boost.
+     */
+    private void runAgc(float[] buf, int len) {
+        double peak = 0.0;
+        for (int i = 0; i < len; i++) {
+            double a = Math.abs(buf[i]);
+            if (a > peak) peak = a;
+        }
+        final double target = 0.45;              // aim peaks near -7dBFS
+        final double maxGain = 200.0;            // up to ~+46dB
+        double desired = target / (peak + 1e-9);
+        if (desired < 1.0) desired = 1.0;        // only boost, never attenuate
+        if (desired > maxGain) desired = maxGain;
+        agcGain += (desired - agcGain) * 0.08;   // smooth over ~250ms
+        double g = agcGain;
+        for (int i = 0; i < len; i++) buf[i] = (float) (buf[i] * g);
+    }
+
     public void stop() {
         running.set(false);
         if (thread != null) {
@@ -104,6 +135,7 @@ public class AudioPipeline {
             int n = record.read(in, 0, BLOCK);
             if (n <= 0) continue;
             for (int i = 0; i < n; i++) flt[i] = in[i] / 32768.0f;
+            if (agcOn) runAgc(flt, n);
             dsp.process(flt, n);
             for (int i = 0; i < n; i++) out[i] = (short) (Math.max(-1f, Math.min(1f, flt[i])) * 32767f);
             if (monitorOn.get()) {

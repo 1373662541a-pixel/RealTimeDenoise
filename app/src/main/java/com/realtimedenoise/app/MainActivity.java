@@ -202,6 +202,7 @@ public class MainActivity extends Activity {
             String name = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
             out = new File(dir, (capture ? "capture_" : "denoise_") + name + ".wav");
         }
+        pipeline.setAutoGain(capture); // faint playback-capture source needs level boost
         pipeline.start(record, cbMonitor.isChecked(), cbSave.isChecked(), out);
         btnStart.setEnabled(false);
         btnStop.setEnabled(true);
