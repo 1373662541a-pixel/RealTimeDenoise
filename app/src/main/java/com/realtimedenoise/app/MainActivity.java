@@ -9,7 +9,6 @@ import android.media.AudioFormat;
 import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
-import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -34,9 +33,9 @@ public class MainActivity extends Activity {
 
     private AudioPipeline pipeline;
     private MediaProjectionManager mpManager;
-    private MediaProjection activeProjection;
     private int mpResultCode;
     private Intent mpResultData;
+    private boolean captureStarting = false;
 
     private Button btnStart, btnStop;
     private CheckBox cbMonitor, cbSave;
@@ -102,7 +101,7 @@ public class MainActivity extends Activity {
 
         rgSource.setOnCheckedChangeListener((g, id) -> {
             if (id == 2) {
-                tvStatus.setText("实验模式：捕获其他应用正在播放的声音。\n请先让龙势云开始播放，再点“开始”，\n并在系统弹窗中允许“录制屏幕/声音”。");
+                tvStatus.setText("实验模式：捕获其他应用正在播放的声音。\n请先让其他应用开始播放，再点“开始”，\n并在系统弹窗中允许“录制屏幕/声音”。");
             } else {
                 tvStatus.setText("实时降噪监听\n（手机麦克风输入）");
             }
@@ -123,6 +122,7 @@ public class MainActivity extends Activity {
                 toast("系统声音捕获需要 Android 10+");
                 return;
             }
+            if (captureStarting) return; // already in progress
             if (mpResultData == null) {
                 mpResultCode = 0;
                 mpResultData = null;
@@ -134,27 +134,63 @@ public class MainActivity extends Activity {
                 }
                 return;
             }
-            try {
-                activeProjection = mpManager.getMediaProjection(mpResultCode, mpResultData);
-                AudioRecord src = buildCaptureRecord(activeProjection);
-                startInternal(src, true);
-            } catch (Exception e) {
-                toast("系统声音捕获启动失败: " + e.getMessage());
-                if (activeProjection != null) { try { activeProjection.stop(); } catch (Exception ignored) {} activeProjection = null; }
-                mpResultData = null;
-            }
+            launchProjectionAndStart();
             return;
         }
 
         // mic source
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
-            return;
-        }
         try {
             startInternal(buildMicRecord(), false);
         } catch (Exception e) {
             toast("启动失败: " + e.getMessage());
+        }
+    }
+
+    private void launchProjectionAndStart() {
+        if (ProjectionService.projection != null) {
+            startCaptureFromProjection();
+            return;
+        }
+        captureStarting = true;
+        Intent si = new Intent(this, ProjectionService.class);
+        si.setAction(ProjectionService.ACTION_PROJECT);
+        si.putExtra("code", mpResultCode);
+        si.putExtra("data", mpResultData);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(si);
+            else startService(si);
+        } catch (Exception e) {
+            captureStarting = false;
+            toast("前台服务启动失败: " + e.getMessage());
+            return;
+        }
+        tvStatus.setText("正在建立捕获服务…");
+        new Thread(() -> {
+            for (int i = 0; i < 60; i++) {
+                if (ProjectionService.projection != null) {
+                    runOnUiThread(() -> {
+                        captureStarting = false;
+                        startCaptureFromProjection();
+                    });
+                    return;
+                }
+                try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+            }
+            runOnUiThread(() -> {
+                captureStarting = false;
+                toast("获取投屏授权失败，请重试");
+                tvStatus.setText("捕获授权失败，点“开始”重试");
+            });
+        }).start();
+    }
+
+    private void startCaptureFromProjection() {
+        try {
+            AudioRecord src = buildCaptureRecord(ProjectionService.projection);
+            startInternal(src, true);
+        } catch (Exception e) {
+            toast("系统声音捕获启动失败: " + e.getMessage());
+            stopProjectionService();
         }
     }
 
@@ -182,7 +218,7 @@ public class MainActivity extends Activity {
         return r;
     }
 
-    private AudioRecord buildCaptureRecord(MediaProjection mp) throws Exception {
+    private AudioRecord buildCaptureRecord(android.media.projection.MediaProjection mp) throws Exception {
         AudioFormat af = new AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(AudioPipeline.SAMPLE_RATE)
@@ -232,15 +268,21 @@ public class MainActivity extends Activity {
 
     private void doStop() {
         pipeline.stop();
-        if (activeProjection != null) {
-            try { activeProjection.stop(); } catch (Exception ignored) {}
-            activeProjection = null;
-        }
+        stopProjectionService();
         mpResultData = null;
+        captureStarting = false;
         btnStart.setEnabled(true);
         btnStop.setEnabled(false);
         tvStatus.setText("已停止");
         toast("已停止");
+    }
+
+    private void stopProjectionService() {
+        try {
+            Intent si = new Intent(this, ProjectionService.class);
+            si.setAction(ProjectionService.ACTION_STOP);
+            startService(si);
+        } catch (Exception ignored) {}
     }
 
     private void toast(String s) {
@@ -250,10 +292,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         pipeline.stop();
-        if (activeProjection != null) {
-            try { activeProjection.stop(); } catch (Exception ignored) {}
-            activeProjection = null;
-        }
+        try {
+            Intent si = new Intent(this, ProjectionService.class);
+            si.setAction(ProjectionService.ACTION_STOP);
+            startService(si);
+        } catch (Exception ignored) {}
         super.onDestroy();
     }
 }
