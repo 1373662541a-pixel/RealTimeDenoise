@@ -1,10 +1,9 @@
 package com.realtimedenoise.app;
 
+import android.media.AudioAttributes;
 import android.media.AudioFormat;
-import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
-import android.media.MediaRecorder;
 
 import java.io.File;
 import java.io.RandomAccessFile;
@@ -12,13 +11,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Real-time pipeline:
- *   AudioRecord mic -> 20ms blocks -> DenoiseDsp -> AudioTrack monitor (+ optional WAV save)
+ *   AudioRecord (mic OR system playback capture) -> 20ms blocks -> DenoiseDsp
+ *     -> AudioTrack monitor (+ optional WAV save)
  * 48000Hz, mono, PCM 16-bit.
+ *
+ * The monitor AudioTrack is built with ALLOW_CAPTURE_BY_NONE so that when we are
+ * capturing "other apps' playback" we do NOT re-capture our own denoised output
+ * (which would cause a feedback loop).
  */
 public class AudioPipeline {
 
-    private static final int SAMPLE_RATE = 48000;
-    private static final int BLOCK = SAMPLE_RATE * 20 / 1000; // 20ms = 960 samples
+    public static final int SAMPLE_RATE = 48000;
+    public static final int BLOCK = SAMPLE_RATE * 20 / 1000; // 20ms = 960 samples
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean monitorOn = new AtomicBoolean(true);
@@ -31,22 +35,32 @@ public class AudioPipeline {
     private RandomAccessFile wav;
     private int wavDataBytes;
 
-    public void start(boolean monitor, boolean save, File outFile) throws Exception {
-        int minRec = AudioRecord.getMinBufferSize(SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        record = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minRec * 2);
+    public void start(AudioRecord source, boolean monitor, boolean save, File outFile) throws Exception {
+        record = source;
 
         int minTrack = AudioTrack.getMinBufferSize(SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
         int bufSize = Math.max(minTrack, BLOCK * 2) * 2;
-        track = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                bufSize, AudioTrack.MODE_STREAM);
+
+        AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build();
+        AudioFormat outFmt = new AudioFormat.Builder()
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .build();
+        track = new AudioTrack.Builder()
+                .setAudioAttributes(attrs)
+                .setAudioFormat(outFmt)
+                .setBufferSizeInBytes(bufSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build();
 
         if (record.getState() != AudioRecord.STATE_INITIALIZED
                 || track.getState() != AudioTrack.STATE_INITIALIZED) {
-            throw new IllegalStateException("Audio device not init (mic or output)");
+            throw new IllegalStateException("Audio device not init (source or output)");
         }
 
         if (save && outFile != null) {
@@ -104,7 +118,6 @@ public class AudioPipeline {
     private void openWav(File f) throws Exception {
         wav = new RandomAccessFile(f, "rw");
         wav.setLength(0);
-        // placeholder 44-byte header
         byte[] h = new byte[44];
         wav.write(h);
         wavDataBytes = 0;
